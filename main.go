@@ -50,12 +50,21 @@ func main() {
 	storysDir := filepath.Join(progDir, "storys")
 	os.MkdirAll(storysDir, 0755)
 
-	// Load API config (global, shared across projects; always in progDir)
+	// Load API config (global, shared across projects; always in progDir).
+	// api.json may hold several saved endpoints; the active one is projected onto
+	// the flat config the rest of the app consumes.
 	apiCfgPath := filepath.Join(progDir, "api.json")
-	apiCfg, err := config.LoadAPIConfig(apiCfgPath)
+	apiDocs, err := config.LoadAPIConfigs(apiCfgPath)
 	if err != nil {
 		fmt.Printf(" [错误] 加载API配置失败: %v\n", err)
 		os.Exit(1)
+	}
+	var apiCfg *config.APIConfig
+	if active := apiDocs.Active(); active != nil {
+		flat := active.ToAPIConfig()
+		apiCfg = &flat
+	} else {
+		apiCfg = config.DefaultAPIConfig()
 	}
 	llm.EnsureContextBudget(apiCfg)
 

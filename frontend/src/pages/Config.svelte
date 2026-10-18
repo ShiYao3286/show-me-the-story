@@ -40,6 +40,201 @@
   let localStoryCfg = { type: '', title: '', target_words_per_chapter: 2500, writing_style: '', writing_pov: '' };
   let testingApi = false;
 
+  // ---- 多端点配置 / 平台预设 / 模型列表 ----
+  let profiles = [];          // [{id,name,provider,base_url,...}]
+  let presets = [];           // [{id,name,base_url,default_model,...}]
+  let activeProfileID = '';
+  let profileName = '';
+  let selectedPresetID = '';
+  let profilesLoading = false;
+  let models = [];
+  let modelsLoading = false;
+  let modelsError = '';
+  let showModelPicker = false;
+
+  $: activeProfile = profiles.find(p => p.id === activeProfileID) || null;
+  $: canDeleteProfile = profiles.length > 1;
+  // Explicit derived flag: `localApiCfg` is reassigned wholesale when a profile is
+  // applied, so reading `localApiCfg.base_url` directly inside a `disabled={...}`
+  // expression can miss updates. A `$:` derivation tracks the field reliably.
+  $: canFetchModels = !!(localApiCfg && localApiCfg.base_url && localApiCfg.base_url.trim());
+
+  async function loadProfiles() {
+    profilesLoading = true;
+    try {
+      const res = await api('GET', '/api/config/api/profiles');
+      profiles = res.profiles || [];
+      presets = res.presets || [];
+      activeProfileID = res.active_id || '';
+      const cur = profiles.find(p => p.id === activeProfileID);
+      profileName = cur?.name || '';
+      if (cur && !cur.name) {
+        // Legacy api.json migrated without a name: show a friendly default.
+        profileName = $t('config.api.profile') + ' 1';
+      }
+      return res;
+    } catch (e) {
+      addToast(e.message, 'error');
+      return null;
+    } finally {
+      profilesLoading = false;
+    }
+  }
+
+  // 把当前激活配置的字段灌进表单
+  function applyProfileToForm(p) {
+    if (!p) return;
+    localApiCfg = {
+      base_url: p.base_url || '',
+      url_strict: !!p.url_strict,
+      model: p.model || '',
+      api_key: p.api_key || '',
+      http_timeout_seconds: p.http_timeout_seconds || 600,
+      max_tokens: p.max_tokens || 32768,
+      context_budget_tokens: p.context_budget_tokens || 900000,
+    };
+    profileName = p.name || '';
+    models = [];
+    modelsError = '';
+    showModelPicker = false;
+  }
+
+  async function switchProfile(id) {
+    if (!id || id === activeProfileID) return;
+    try {
+      await api('POST', '/api/config/api/profiles/activate', { id });
+      // Drive the form from what the server reports, not from the local array
+      // (Svelte may not have flushed `profiles` yet).
+      const res = await loadProfiles();
+      const p = res?.profiles?.find(x => x.id === id);
+      if (p) {
+        applyProfileToForm(p);
+        const flat = await api('GET', '/api/config/api');
+        apiConfig.set(flat);
+      }
+      activeProfileID = id;
+      addToast($t('config.api.profile.switched', { name: p?.name || id }), 'success');
+    } catch (e) {
+      // Restore the select to the profile that is actually active.
+      addToast(e.message, 'error');
+      await loadProfiles();
+    }
+  }
+
+  function applyPreset(presetID) {
+    selectedPresetID = presetID;
+    const p = presets.find(x => x.id === presetID);
+    if (!p) return;
+    localApiCfg = {
+      ...localApiCfg,
+      base_url: p.base_url || localApiCfg.base_url,
+      url_strict: !!p.url_strict,
+      model: p.default_model || localApiCfg.model,
+    };
+    if (p.name) {
+      profileName = p.name;
+    }
+    models = [];
+    modelsError = '';
+    showModelPicker = false;
+    addToast($t('config.api.preset.applied', { name: p.name }), 'info');
+  }
+
+  async function fetchModels() {
+    modelsLoading = true;
+    modelsError = '';
+    try {
+      const res = await api('POST', '/api/config/api/models', {
+        base_url: localApiCfg.base_url,
+        url_strict: !!localApiCfg.url_strict,
+        api_key: localApiCfg.api_key,
+      });
+      models = res.models || [];
+      if (models.length === 0) {
+        modelsError = $t('config.api.models.empty');
+      } else {
+        showModelPicker = true;
+        addToast($t('config.api.models.count', { n: models.length }), 'success');
+      }
+    } catch (e) {
+      modelsError = e.message;
+      addToast($t('config.api.models.failed', { error: e.message }), 'error');
+    } finally {
+      modelsLoading = false;
+    }
+  }
+
+  function pickModel(id) {
+    localApiCfg = { ...localApiCfg, model: id };
+    showModelPicker = false;
+  }
+
+  async function saveProfile() {
+    const name = (profileName || '').trim();
+    if (!name) {
+      addToast($t('config.api.profile.namePlaceholder'), 'error');
+      return;
+    }
+    try {
+      const res = await api('POST', '/api/config/api/profiles', {
+        id: activeProfileID,
+        name,
+        provider: selectedPresetID || activeProfile?.provider || '',
+        ...localApiCfg,
+        activate: true,
+      });
+      // A brand-new profile has no id until the server assigns one; adopt it so
+      // subsequent saves update instead of creating duplicates.
+      if (res?.id) activeProfileID = res.id;
+      creatingProfile = false;
+      await loadProfiles();
+      const flat = await api('GET', '/api/config/api');
+      apiConfig.set(flat);
+      addToast($t('config.api.profile.saved'), 'success');
+    } catch (e) { addToast(e.message, 'error'); }
+  }
+
+  async function deleteProfile() {
+    if (!canDeleteProfile) {
+      addToast($t('config.api.profile.lastCannotDelete'), 'error');
+      return;
+    }
+    const p = activeProfile;
+    if (!p) return;
+    showConfirm($t('config.api.profile.deleteConfirm', { name: p.name || p.id }), async () => {
+      try {
+        await api('DELETE', '/api/config/api/profiles/' + encodeURIComponent(p.id));
+        const res = await loadProfiles();
+        const next = (res?.profiles || []).find(x => x.id === res?.active_id);
+        if (next) {
+          applyProfileToForm(next);
+          const flat = await api('GET', '/api/config/api');
+          apiConfig.set(flat);
+        }
+        addToast($t('config.api.profile.deleted'), 'success');
+      } catch (e) { addToast(e.message, 'error'); }
+    });
+  }
+
+  // Start a blank profile. The form keeps whatever is currently typed so the user
+  // can branch off an existing endpoint, but `activeProfileID` must become empty
+  // so saveProfile() creates instead of overwriting the current profile.
+  let creatingProfile = false;
+
+  function newProfile() {
+    const baseName = $t('config.api.profile.new');
+    let n = profiles.length + 1;
+    let name = baseName + ' ' + n;
+    while (profiles.some(p => p.name === name)) { n++; name = baseName + ' ' + n; }
+    creatingProfile = true;
+    activeProfileID = '';
+    profileName = name;
+    selectedPresetID = '';
+    models = [];
+    modelsError = '';
+    addToast($t('config.api.profile.new') + ': ' + name, 'info');
+  }
+
   $: resolvedChatURL = resolveChatCompletionsURL(localApiCfg.base_url, !!localApiCfg.url_strict);
 
   let apiCfgSnapshot = '';
@@ -110,15 +305,8 @@
     try { apiConfig.set(await api('GET', '/api/config/api')); } catch (e) {}
     try { config.set(await api('GET', '/api/config')); } catch (e) {}
     try { settings.set(await api('GET', '/api/settings')); } catch (e) {}
+    await loadProfiles();
   });
-
-  async function saveAPIConfig() {
-    try {
-      await api('PUT', '/api/config/api', localApiCfg);
-      apiConfig.set({ ...localApiCfg });
-      addToast($t('config.api.saved'), 'success');
-    } catch (e) { addToast(e.message, 'error'); }
-  }
 
   // 影响连接测试的字段签名；配置改动后据此自动清除持久化的测试结果
   const apiTestSig = c => JSON.stringify([c.base_url, !!c.url_strict, c.model, c.api_key, c.http_timeout_seconds, c.max_tokens]);
@@ -447,11 +635,65 @@
 
 <div class="space-y-3">
   <ConfigChangePanel />
-  <!-- API + Story Config: side by side -->
-  <div class="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
-    <div class="card bg-base-200">
-      <div class="card-body p-4 gap-2">
-        <h3 class="card-title text-base">{$t('config.api.title')}</h3>
+  <!-- API 配置：独占整行。多端点切换器 / 平台预设 / 模型列表把字段数量翻了一倍，
+       放进原来的半栏会挤成一条，所以这里单独占满一行。 -->
+  <div class="card bg-base-200">
+    <div class="card-body p-4 gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
+        <h3 class="card-title text-base flex-1 min-w-0">{$t('config.api.title')}</h3>
+        {#if canDeleteProfile}
+          <span class="badge badge-xs badge-ghost shrink-0">{$t('config.api.profile.current')}</span>
+        {/if}
+      </div>
+
+      <!-- 端点切换器：多个 API / 端口之间一键切换 -->
+      <div class="rounded-lg border border-base-content/15 p-2">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <div>
+            <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.profile')}</span>
+            <div class="flex items-center gap-1.5">
+              <!-- No bind:value here: binding updates activeProfileID before the
+                   change handler runs, which made switchProfile's no-op guard fire
+                   and the form never refresh. The bound variable is set by
+                   switchProfile after the server confirms the switch. -->
+              <select class="select select-sm flex-1 min-w-0"
+                      value={activeProfileID}
+                      on:change={(e) => switchProfile(e.currentTarget.value)}
+                      disabled={$taskRunning || testingApi || profilesLoading}>
+                {#each profiles as p}
+                  <option value={p.id}>{p.name || p.id}{p.base_url ? ' — ' + p.base_url : ''}</option>
+                {/each}
+              </select>
+              <button class="btn btn-ghost btn-sm shrink-0" on:click={newProfile} disabled={$taskRunning || testingApi}>
+                {$t('config.api.profile.new')}
+              </button>
+              {#if canDeleteProfile && activeProfileID}
+                <button class="btn btn-error btn-outline btn-sm shrink-0" on:click={deleteProfile} disabled={$taskRunning || testingApi}>
+                  {$t('config.api.profile.delete')}
+                </button>
+              {/if}
+            </div>
+          </div>
+          <div>
+            <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.profile.name')}</span>
+            <input type="text" class="input input-sm w-full" bind:value={profileName}
+                   placeholder={$t('config.api.profile.namePlaceholder')}
+                   disabled={$taskRunning || testingApi} />
+          </div>
+        </div>
+        <div class="mt-2">
+          <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.preset')}</span>
+          <select class="select select-sm w-full" bind:value={selectedPresetID}
+                  on:change={(e) => applyPreset(e.currentTarget.value)}
+                  disabled={$taskRunning || testingApi}>
+            <option value="">{$t('config.api.preset.choose')}</option>
+            {#each presets as p}
+              <option value={p.id}>{p.name}{p.base_url ? ' — ' + p.base_url : ''}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+
         <div class="grid grid-cols-2 gap-x-3 gap-y-1.5">
           <div class="col-span-2">
             <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.baseUrl')}</span>
@@ -467,9 +709,49 @@
               </p>
             {/if}
           </div>
-          <div>
-            <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.model')}</span>
-            <input type="text" class="input input-sm w-full" bind:value={localApiCfg.model} placeholder="gpt-4" disabled={$taskRunning || testingApi} />
+          <div class="col-span-2">
+            <div class="flex items-end gap-1.5">
+              <div class="flex-1 min-w-0">
+                <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.model')}</span>
+                {#if showModelPicker && models.length}
+                  <!-- Keep the typed model selectable even when the endpoint's list
+                       uses a different id (e.g. qwen2.5-14b vs qwen2.5-14b-instruct),
+                       otherwise the select renders blank and looks broken. -->
+                  <select class="select select-sm w-full" bind:value={localApiCfg.model} disabled={$taskRunning || testingApi}>
+                    {#if localApiCfg.model && !models.some(m => m.id === localApiCfg.model)}
+                      <option value={localApiCfg.model}>{localApiCfg.model}（{$t('config.api.models.manual')}）</option>
+                    {/if}
+                    {#each models as m}
+                      <option value={m.id}>{m.id}{m.context_window ? ' · ' + m.context_window + ' ctx' : ''}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  <input type="text" class="input input-sm w-full" bind:value={localApiCfg.model} placeholder="gpt-4" disabled={$taskRunning || testingApi} />
+                {/if}
+              </div>
+              <button class="btn btn-outline btn-sm shrink-0" on:click={fetchModels}
+                      disabled={$taskRunning || testingApi || modelsLoading || !canFetchModels}
+                      title={$t('config.api.models.hint')}>
+                {#if modelsLoading}
+                  <span class="loading loading-spinner loading-xs"></span>{$t('config.api.models.fetching')}
+                {:else}
+                  {$t('config.api.models.fetch')}
+                {/if}
+              </button>
+            </div>
+            {#if modelsError}
+              <p class="text-xs text-warning mt-0.5">{$t('config.api.models.failed', { error: modelsError })}</p>
+            {:else if models.length}
+              <div class="flex items-center gap-1.5 mt-0.5">
+                <span class="text-xs text-success">{$t('config.api.models.count', { n: models.length })}</span>
+                <button class="btn btn-ghost btn-xs h-auto min-h-0 py-0.5"
+                        on:click={() => showModelPicker = !showModelPicker}>
+                  {showModelPicker ? $t('config.api.models.manual') : $t('config.api.models.pick')}
+                </button>
+              </div>
+            {:else}
+              <p class="text-xs text-base-content/45 mt-0.5">{$t('config.api.models.hint')}</p>
+            {/if}
           </div>
           <div>
             <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.timeout')}</span>
@@ -478,6 +760,10 @@
           <div>
             <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.maxTokens')}</span>
             <input type="number" class="input input-sm w-full" bind:value={localApiCfg.max_tokens} placeholder="{$t('config.api.maxTokens.placeholder')}" disabled={$taskRunning || testingApi} title={$t('config.api.maxTokens.tooltip')} />
+          </div>
+          <div>
+            <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.contextBudget')}</span>
+            <input type="number" class="input input-sm w-full" bind:value={localApiCfg.context_budget_tokens} placeholder="300000" disabled={$taskRunning || testingApi} title={$t('config.api.contextBudget.tooltip')} />
           </div>
           <div class="col-span-2">
             <span class="text-xs text-base-content/65 mb-0.5 block">{$t('config.api.key')}</span>
@@ -501,11 +787,13 @@
               {$t('config.api.test')}
             {/if}
           </button>
-          <button class="btn btn-primary btn-xs" on:click={saveAPIConfig} disabled={$taskRunning || testingApi}>{$t('common.save')}</button>
+          <button class="btn btn-primary btn-xs" on:click={saveProfile} disabled={$taskRunning || testingApi}>{$t('config.api.profile.save')}</button>
         </div>
-      </div>
     </div>
+  </div>
 
+  <!-- 故事配置（独占整行，与写作风格/视角并列） -->
+  <div class="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
     <div class="card bg-base-200">
       <div class="card-body p-4 gap-2">
         <h3 class="card-title text-base">{$t('config.story.title')}</h3>

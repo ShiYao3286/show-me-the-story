@@ -47,6 +47,13 @@ func StartWebServer(apiCfg *config.APIConfig, apiCfgPath string, logger *sse.Log
 	mux.HandleFunc("PUT /api/config/api", h.PutAPIConfig)
 	mux.HandleFunc("POST /api/config/api/test", h.PostAPITest)
 
+	// Saved API endpoints: multiple providers / keys / ports with one active.
+	mux.HandleFunc("GET /api/config/api/profiles", h.GetAPIConfigs)
+	mux.HandleFunc("POST /api/config/api/profiles", h.PostAPIConfigProfile)
+	mux.HandleFunc("POST /api/config/api/profiles/activate", h.PostAPIConfigActivate)
+	mux.HandleFunc("DELETE /api/config/api/profiles/{id}", h.DeleteAPIConfigProfile)
+	mux.HandleFunc("POST /api/config/api/models", h.PostAPIConfigModels)
+
 	// Project-scoped endpoints (require project selection)
 	mux.HandleFunc("GET /api/config", h.GetConfig)
 	mux.HandleFunc("PUT /api/config", h.PutConfig)

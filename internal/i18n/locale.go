@@ -105,6 +105,34 @@ var errorCatalog = map[string]map[string]string{
 		LangZH: "无效的JSON: %s",
 		LangEN: "Invalid JSON: %s",
 	},
+	"load_api_config_failed": {
+		LangZH: "读取 API 配置失败: %s",
+		LangEN: "Failed to read API config: %s",
+	},
+	"api_profile_name_required": {
+		LangZH: "请填写配置名称",
+		LangEN: "Profile name is required",
+	},
+	"api_profile_not_found": {
+		LangZH: "配置不存在",
+		LangEN: "Profile not found",
+	},
+	"api_profile_delete_failed": {
+		LangZH: "无法删除该配置: %s",
+		LangEN: "Cannot delete this profile: %s",
+	},
+	"missing_profile_id": {
+		LangZH: "缺少配置 ID",
+		LangEN: "Profile id is required",
+	},
+	"api_base_url_required": {
+		LangZH: "请先填写 API Base URL",
+		LangEN: "API Base URL is required",
+	},
+	"api_models_failed": {
+		LangZH: "获取模型列表失败: %s",
+		LangEN: "Failed to list models: %s",
+	},
 	"missing_feedback": {
 		LangZH: "缺少 feedback 字段",
 		LangEN: "feedback field is required",

@@ -54,8 +54,8 @@ main.go
 - `internal/httpapi/`：路由、请求校验、项目管理、异步任务互斥、SSE 和本地化错误。
 - `internal/agent/`：助理循环、工具解析与执行、危险操作确认。
 - `internal/story/`：大纲、写作、事实与设定、伏笔、导入、Skill、会话、校订等领域逻辑。
-- `internal/llm/`：OpenAI 兼容客户端、流式完整性、重试、token 统计、JSON 提取。
-- `internal/config/`：API/项目配置和中英默认提示词。
+- `internal/llm/`：OpenAI 兼容客户端、流式完整性、重试、token 统计、JSON 提取、模型列表。
+- `internal/config/`：API/项目配置、多端点配置档案、平台预设和中英默认提示词。
 - `internal/sse/`、`i18n/`、`prose/`、`fsutil/`、`devlog/`：领域无关基础能力。
 - `frontend/src/`：Svelte 页面、组件、stores、API/SSE/i18n；生产产物仅在 `frontend/dist/`。
 
@@ -117,6 +117,9 @@ main.go
 ## LLM、提示词与 Skill
 
 - API 地址通过 `resolveChatCompletionsURL` 统一解析；严格模式只补 `/chat/completions`，普通裸域名补 `/v1/chat/completions`。
+- `api.json` 保存多端点配置档案（`APIConfigsFile`：`version`/`active_id`/`profiles`），激活项投影为扁平 `APIConfig` 供全应用使用；旧的扁平 `api.json` 读取时自动迁移为单档案，写入始终用新结构。`SaveAPIConfigsFlat` 只更新激活档案，其余档案原样保留。至少保留一个档案，删除最后一个必须失败。
+- 平台预设（`config.ProviderPresets`）只收录 OpenAI 兼容 `/chat/completions` 端点；新增预设必须给出可用的 `base_url`（`custom` 除外）。
+- 模型列表走 `llm.ListModels`（`GET <api base>/models`），同时兼容 `{"data":[...]}` 与裸数组，并尽量读取 `context_window`/`context_length`/`max_context_length`。端点不支持或返回非 200 时报错让用户手填，不得静默回退为空列表。
 - 流式读取使用 `bufio.Reader`；损坏 SSE、缺少 `finish_reason`/`[DONE]` 或提前 EOF 都是错误，半截响应不得进入 JSON 解析。
 - 401/403/404 为致命错误；可重试错误沿用现有指数退避。Agent 已收到流片段后失败时不得再拼接同步回退结果。
 - 每个模型请求以 `ContextBudgetTokens - MaxTokens - max(4096, 5% 上下文窗口)` 作为保守估算的输入上限；模型端点能报告更小的真实窗口时自动向下收紧配置，最终预检超限属于不可重试错误。

@@ -354,12 +354,9 @@ func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	llm.EnsureContextBudget(&newCfg)
 
-	data, err := json.MarshalIndent(newCfg, "", "  ")
-	if err != nil {
-		h.writeErrorReq(w, r, http.StatusInternalServerError, "serialize_api_config_failed", err.Error())
-		return
-	}
-	if err := fsutil.WriteFileAtomic(h.apiCfgPath, data); err != nil {
+	// Persist into the active profile of the multi-endpoint document so saved
+	// profiles survive; api.json keeps a single, backwards-compatible shape.
+	if _, err := config.SaveAPIConfigsFlat(h.apiCfgPath, &newCfg); err != nil {
 		h.writeErrorReq(w, r, http.StatusInternalServerError, "save_api_config_failed", err)
 		return
 	}
