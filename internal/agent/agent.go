@@ -1131,15 +1131,148 @@ func executeTool(call *ToolCall, tools []Tool, ctx *AgentContext) (string, strin
 	lang := projectLang(ctx)
 	for _, t := range tools {
 		if t.Name == call.Name {
-			result, err := t.Execute(call.Arguments, ctx)
+			// Normalize argument types before the handler decodes them. Models
+			// routinely stringify numbers ("batch_id": "1"); handlers ignore the
+			// unmarshal error, so an unconverted value silently becomes zero and
+			// the tool fails with a confusing message instead.
+			args := coerceToolArguments(t, call.Arguments)
+			result, err := t.Execute(args, ctx)
 			if err != nil {
 				return i18n.T(lang, "agent.tool_exec_error", err), "agent.tool_exec_error", i18n.MsgArgs(err)
 			}
-			key, args := ctx.takeToolMsg()
-			return result, key, args
+			key, argsOut := ctx.takeToolMsg()
+			return result, key, argsOut
 		}
 	}
 	return i18n.T(lang, "agent.unknown_tool", call.Name), "agent.unknown_tool", i18n.MsgArgs(call.Name)
+}
+
+// coerceToolArguments rewrites values to the JSON type declared by the tool's
+// parameter list. It only fixes scalars ("12" -> 12, 1 -> true) and leaves
+// anything it cannot safely convert untouched, so a genuinely wrong argument
+// still surfaces as a handler error rather than being silently invented.
+func coerceToolArguments(t Tool, args json.RawMessage) json.RawMessage {
+	if len(args) == 0 || !strings.HasPrefix(strings.TrimSpace(string(args)), "{") {
+		return args
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(args, &values); err != nil {
+		return args
+	}
+	types := toolParamTypes(t.Parameters)
+	if len(types) == 0 {
+		return args
+	}
+
+	changed := false
+	for name, want := range types {
+		raw, ok := values[name]
+		if !ok {
+			continue
+		}
+		if coerced, ok := coerceScalar(strings.TrimSpace(string(raw)), want); ok {
+			values[name] = json.RawMessage(coerced)
+			changed = true
+		}
+	}
+	if !changed {
+		return args
+	}
+	out, err := json.Marshal(values)
+	if err != nil {
+		return args
+	}
+	return out
+}
+
+// coerceScalar converts a raw JSON scalar to the wanted type. It reports false
+// when the value is already correct or cannot be converted safely.
+func coerceScalar(raw, want string) (string, bool) {
+	if raw == "" {
+		return "", false
+	}
+	quoted := strings.HasPrefix(raw, `"`)
+	switch want {
+	case "integer", "number":
+		var s string
+		if quoted {
+			if err := json.Unmarshal([]byte(raw), &s); err != nil {
+				return "", false
+			}
+		} else {
+			s = raw
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return "", false
+		}
+		// Keep it a number only if it really parses as one.
+		var num json.Number
+		if err := json.Unmarshal([]byte(s), &num); err != nil {
+			return "", false
+		}
+		if want == "integer" && strings.ContainsAny(num.String(), ".eE") {
+			return "", false
+		}
+		if !quoted {
+			return "", false // already a number
+		}
+		return num.String(), true
+	case "boolean":
+		if !quoted {
+			if raw == "true" || raw == "false" {
+				return "", false // already correct
+			}
+			return "", false
+		}
+		var s string
+		if err := json.Unmarshal([]byte(raw), &s); err != nil {
+			return "", false
+		}
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "1", "yes":
+			return "true", true
+		case "false", "0", "no":
+			return "false", true
+		}
+		return "", false
+	case "string":
+		if quoted {
+			return "", false
+		}
+		// Numbers/booleans headed for a string field are re-quoted.
+		if raw == "true" || raw == "false" || isJSONNumber(raw) {
+			return `"` + raw + `"`, true
+		}
+	}
+	return "", false
+}
+
+func isJSONNumber(raw string) bool {
+	var num json.Number
+	return json.Unmarshal([]byte(raw), &num) == nil
+}
+
+// toolParamTypes returns the declared JSON type of each parameter. It mirrors
+// the schema construction used for function-calling declarations so both sides
+// agree on the intended type.
+func toolParamTypes(shorthand string) map[string]string {
+	trimmed := strings.TrimSpace(shorthand)
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+		return nil
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &params); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(params))
+	for name, raw := range params {
+		prop := paramProperty(name, raw)
+		if t, ok := prop["type"].(string); ok {
+			out[name] = t
+		}
+	}
+	return out
 }
 
 // requireConfirm 检查危险操作的 confirm 参数。

@@ -58,29 +58,84 @@ func toolParameterSchema(shorthand string) json.RawMessage {
 	}
 
 	for name, raw := range params {
-		var desc string
-		// Values are normally plain strings ("章节号"), but tolerate an object
-		// schema if a tool ever declares one.
-		if err := json.Unmarshal(raw, &desc); err != nil {
-			var asObj map[string]interface{}
-			if err := json.Unmarshal(raw, &asObj); err == nil {
-				s.Properties[name] = asObj
-				continue
-			}
-			desc = string(raw)
-		}
-		prop := map[string]interface{}{
-			"type":        inferParamType(name, desc),
-			"description": desc,
-		}
-		if prop["type"] == "array" {
-			prop["items"] = map[string]interface{}{"type": "string"}
-		}
-		s.Properties[name] = prop
+		s.Properties[name] = paramProperty(name, raw)
 	}
 
 	b, _ := json.Marshal(s)
 	return b
+}
+
+// paramProperty builds one JSON Schema property.
+//
+// The catalogue mixes two conventions, and getting the type wrong is fatal: a
+// string-typed integer reaches the handler as "12", which encoding/json refuses
+// to unmarshal into an int ("cannot unmarshal string into Go struct field").
+//
+//   - Example form: {"num": 1} or {"confirm": true} — the literal already has the
+//     right JSON type, so trust it.
+//   - Description form: {"num": "章节号"} — the string is human text, so the type
+//     is inferred from the parameter name.
+func paramProperty(name string, raw json.RawMessage) map[string]interface{} {
+	// Example form: a non-string literal states the type directly.
+	if t, ok := jsonLiteralType(raw); ok {
+		prop := map[string]interface{}{"type": t}
+		switch t {
+		case "array":
+			prop["items"] = map[string]interface{}{"type": "string"}
+		case "object":
+			// An object example cannot describe a schema; accept any object.
+			prop = map[string]interface{}{"type": "object"}
+		}
+		return prop
+	}
+
+	// Description form: the value is human-readable text.
+	var desc string
+	if err := json.Unmarshal(raw, &desc); err != nil {
+		desc = string(raw)
+	}
+	t := inferParamType(name, desc)
+	prop := map[string]interface{}{
+		"type":        t,
+		"description": desc,
+	}
+	if t == "array" {
+		prop["items"] = map[string]interface{}{"type": "string"}
+	}
+	return prop
+}
+
+// jsonLiteralType reports the JSON type of a non-string literal. It returns false
+// for strings, because those carry descriptions rather than values.
+func jsonLiteralType(raw json.RawMessage) (string, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return "", false
+	}
+	switch trimmed[0] {
+	case '"':
+		return "", false
+	case '{':
+		return "object", true
+	case '[':
+		return "array", true
+	}
+	switch trimmed {
+	case "true", "false":
+		return "boolean", true
+	case "null":
+		return "", false
+	}
+	// Anything else that parses as a JSON number is a number. Integers use
+	// "integer" so schema-validating providers reject 1.5 for a chapter number.
+	var num json.Number
+	if err := json.Unmarshal(raw, &num); err == nil {
+		if strings.ContainsAny(num.String(), ".eE") {
+			return "number", true
+		}
+		return "integer", true
+	}
+	return "", false
 }
 
 // inferParamType guesses a JSON type from the parameter name and description.
