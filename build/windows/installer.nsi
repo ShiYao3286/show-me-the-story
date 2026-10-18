@@ -63,8 +63,8 @@ VIAddVersionKey "CompanyName"     "${APP_PUBLISHER}"
 VIAddVersionKey "LegalCopyright"  "MIT License"
 
 ; ---------- 界面 ----------
-!define MUI_ICON   "E:\ai处理文件\_smts_pack\repo\build\windows\icon.ico"
-!define MUI_UNICON "E:\ai处理文件\_smts_pack\repo\build\windows\icon.ico"
+!define MUI_ICON   "icon.ico"
+!define MUI_UNICON "icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "欢迎安装 ${APP_NAME_ZH}"
 !define MUI_WELCOMEPAGE_TEXT  "这是一个本地运行的 AI 长篇小说创作工具。$\r$\n$\r$\n安装完成后，从开始菜单或桌面快捷方式启动，程序会在浏览器中打开写作界面（默认地址 http://localhost:48090）。$\r$\n$\r$\n你的小说数据保存在安装目录下的 storys 文件夹中；卸载时不会删除这些数据。"
