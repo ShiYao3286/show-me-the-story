@@ -3,7 +3,51 @@
   import { api } from '../lib/api.js';
   import { settings } from '../lib/stores.js';
   import { t, uiLocale } from '../lib/i18n/index.js';
+  import { uiTheme } from '../lib/theme.js';
   import { layoutParams, fitTransform, kineticEnergy, cameraFrame } from '../lib/forceGraphLayout.js';
+
+  // Node/edge palette is derived from the active theme tokens so the graph follows
+  // the dark/light switch instead of hardcoding colors.
+  const FALLBACK_PALETTE = {
+    node: { character: '#5b8af5', worldview: '#4caf50', organization: '#ff9800' },
+    edge: '#4d5577',
+    edgeHover: '#7e9bff',
+    edgeLabel: '#9aa0b5',
+    edgeLabelHover: '#cdd6ff',
+    nodeLabel: '#ffffff',
+    nodeStroke: '#ffffff',
+    tooltipBg: 'rgba(0,0,0,0.8)',
+    tooltipFg: '#ffffff',
+  };
+
+  function readPalette() {
+    if (typeof window === 'undefined' || !document?.documentElement) return FALLBACK_PALETTE;
+    const css = getComputedStyle(document.documentElement);
+    const token = (name, fallback) => {
+      const v = css.getPropertyValue(name).trim();
+      return v || fallback;
+    };
+    const light = (document.documentElement.getAttribute('data-theme') || 'xianii') === 'xianii-light';
+    return {
+      node: {
+        // 实体三类用语义色，保证深浅主题下都有足够对比
+        character: token('--color-primary', FALLBACK_PALETTE.node.character),
+        worldview: token('--color-accent', FALLBACK_PALETTE.node.worldview),
+        organization: token('--color-secondary', FALLBACK_PALETTE.node.organization),
+      },
+      edge: light ? 'color-mix(in oklab,' + token('--color-base-content', '#201d19') + ' 42%, transparent)' : FALLBACK_PALETTE.edge,
+      edgeHover: token('--color-primary', FALLBACK_PALETTE.edgeHover),
+      edgeLabel: light ? '#57524a' : FALLBACK_PALETTE.edgeLabel,
+      edgeLabelHover: token('--color-primary', FALLBACK_PALETTE.edgeLabelHover),
+      nodeLabel: token('--color-primary-content', FALLBACK_PALETTE.nodeLabel),
+      nodeStroke: light ? '#201d19' : FALLBACK_PALETTE.nodeStroke,
+      tooltipBg: light ? 'rgba(255,254,250,0.96)' : FALLBACK_PALETTE.tooltipBg,
+      tooltipFg: light ? '#201d19' : FALLBACK_PALETTE.tooltipFg,
+      light,
+    };
+  }
+
+  let palette = readPalette();
 
   let canvas;
   let container;
@@ -263,42 +307,41 @@
         if (!s || !t) continue;
         const connected = hov && (e.source === hov.id || e.target === hov.id);
         ctx.globalAlpha = hov && !connected ? 0.12 : 1;
-        ctx.strokeStyle = connected ? '#7e9bff' : '#4d5577';
+        ctx.strokeStyle = connected ? palette.edgeHover : palette.edge;
         ctx.lineWidth = connected ? 2.5 : 1.5;
         ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y); ctx.stroke();
         if (e.label) {
           const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
-          ctx.fillStyle = connected ? '#cdd6ff' : '#9aa0b5';
+          ctx.fillStyle = connected ? palette.edgeLabelHover : palette.edgeLabel;
           ctx.font = connected ? 'bold 13px sans-serif' : '12px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText(e.label, mx, my - 5);
         }
       }
       ctx.globalAlpha = 1;
-      const colors = { character: '#5b8af5', worldview: '#4caf50', organization: '#ff9800' };
       for (const n of this.nodes) {
         const isHov = n === hov;
         const isNeighbor = neighborIds ? neighborIds.has(n.id) : false;
         ctx.globalAlpha = hov && !isHov && !isNeighbor ? 0.25 : 1;
-        ctx.fillStyle = colors[n.type] || '#5b8af5';
+        ctx.fillStyle = palette.node[n.type] || palette.node.character;
         this.nodePath(ctx, n);
         ctx.fill();
         if (isHov || isNeighbor) {
-          ctx.strokeStyle = isHov ? '#ffffff' : 'rgba(255,255,255,0.55)';
+          ctx.strokeStyle = isHov ? palette.nodeStroke : 'rgba(255,255,255,0.55)';
           ctx.lineWidth = isHov ? 3 : 2;
           this.nodePath(ctx, n, 3);
           ctx.stroke();
         }
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = palette.nodeLabel; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         const lbl = n.label.length > 6 ? n.label.slice(0, 5) + '…' : n.label;
         ctx.fillText(lbl, n.x, n.y);
       }
       ctx.globalAlpha = 1;
       if (hov) {
-        ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.font = '13px sans-serif';
+        ctx.fillStyle = palette.tooltipBg; ctx.font = '13px sans-serif';
         const tw = ctx.measureText(hov.label).width;
         ctx.fillRect(hov.x - tw / 2 - 7, hov.y - hov.r - 28, tw + 14, 22);
-        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = palette.tooltipFg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText(hov.label, hov.x, hov.y - hov.r - 17);
       }
       ctx.restore();
@@ -349,13 +392,19 @@
   $: if ($settings && graph) {
     graph.updateData($settings);
   }
+
+  // Re-read the palette and repaint when the theme changes.
+  $: if ($uiTheme) {
+    palette = readPalette();
+    if (graph) graph.draw();
+  }
 </script>
 
 <div bind:this={container} class="relative w-full bg-base-200 border border-base-content/10 rounded-lg overflow-hidden" style="height:calc(100vh - 180px)">
   <canvas bind:this={canvas}></canvas>
   <div class="absolute bottom-3 right-3 bg-base-300 border border-base-content/10 rounded-lg p-2 text-xs flex gap-4">
-    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-[#5b8af5] mr-1 align-middle"></span>{$t('relations.legend.character')}</span>
-    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-[#4caf50] mr-1 align-middle"></span>{$t('relations.legend.worldview')}</span>
-    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-[#ff9800] mr-1 align-middle"></span>{$t('relations.legend.organization')}</span>
+    <span><span class="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle" style="background:{palette.node.character}"></span>{$t('relations.legend.character')}</span>
+    <span><span class="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle" style="background:{palette.node.worldview}"></span>{$t('relations.legend.worldview')}</span>
+    <span><span class="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle" style="background:{palette.node.organization}"></span>{$t('relations.legend.organization')}</span>
   </div>
 </div>

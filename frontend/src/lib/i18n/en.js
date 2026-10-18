@@ -109,6 +109,10 @@ export default {
   'app.uiLang.label': 'UI language',
   'app.uiLang.zh': 'ZH',
   'app.uiLang.en': 'EN',
+  'app.theme.dark': 'Dark',
+  'app.theme.light': 'Light',
+  'app.theme.toDark': 'Switch to dark theme',
+  'app.theme.toLight': 'Switch to the paper (light) theme',
 
   // Navigation
   'nav.config': 'Config',

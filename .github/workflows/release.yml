@@ -11,8 +11,15 @@ permissions:
 jobs:
   checks:
     uses: ./.github/workflows/check.yml
-  release:
+
+  # Windows installer (Chinese wizard). Separate job so it can run on windows-latest
+  # where NSIS and Pillow are available, while the cross-build below stays on Linux.
+  installer:
     needs: checks
+    uses: ./.github/workflows/windows-installer.yml
+
+  release:
+    needs: [checks, installer]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -76,6 +83,15 @@ jobs:
             rm -f "$out"
           done
           ls -lh release/
+
+      - name: Download Windows installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ShowMeTheStory-Setup-${{ github.ref_name }}-windows-amd64
+          path: release
+
+      - name: List release assets
+        run: ls -lh release/
 
       - name: Create GitHub Release
         env:

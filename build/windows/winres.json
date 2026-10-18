@@ -1,0 +1,54 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": [
+        "icon_256.png",
+        "icon_128.png",
+        "icon_64.png",
+        "icon_48.png",
+        "icon_32.png",
+        "icon_24.png",
+        "icon_16.png"
+      ]
+    }
+  },
+  "RT_MANIFEST": {
+    "1": {
+      "0000": {
+        "file": "app.manifest"
+      }
+    }
+  },
+  "RT_VERSION": {
+    "1": {
+      "0000": {
+        "fixed": {
+          "file_version": "4.0.2.0",
+          "product_version": "4.0.2.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "xianii",
+            "FileDescription": "Show Me The Story - AI novel writing workspace",
+            "FileVersion": "4.0.2-ui",
+            "InternalName": "show-me-the-story",
+            "LegalCopyright": "MIT License",
+            "OriginalFilename": "show-me-the-story.exe",
+            "ProductName": "Show Me The Story",
+            "ProductVersion": "4.0.2-ui"
+          },
+          "0804": {
+            "CompanyName": "xianii",
+            "FileDescription": "AI 小说写手",
+            "FileVersion": "4.0.2-ui",
+            "InternalName": "show-me-the-story",
+            "LegalCopyright": "MIT License",
+            "OriginalFilename": "show-me-the-story.exe",
+            "ProductName": "AI 小说写手",
+            "ProductVersion": "4.0.2-ui"
+          }
+        }
+      }
+    }
+  }
+}

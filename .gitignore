@@ -8,3 +8,14 @@ frontend/dist
 showmethestory
 dev.log
 graphify-out/
+
+# Generated / local build outputs
+/dist/
+dist-test/
+/rs_showmethestory_*.syso
+build/windows/icon_*.png
+build/windows/icon.ico
+build/windows/icon-*.png
+
+# Tracked packaging sources (the blanket *.json above would swallow winres.json)
+!build/windows/winres.json

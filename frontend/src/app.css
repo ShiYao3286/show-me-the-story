@@ -8,6 +8,43 @@
   --depth: 0;
   --surface-border: color-mix(in oklch, var(--color-base-content) 12%, transparent);
   --surface-muted: color-mix(in oklch, var(--color-base-200) 88%, var(--color-base-300));
+  /* 正文字体栈：优先中文衬线，本机/系统均已具备，无需下载字体 */
+  --font-prose: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", ui-serif, Georgia, serif;
+  /* 统一次级文字色，替代散落的 /60 /65 /70 /30 /45 五档 */
+  --ink-meta: color-mix(in oklch, var(--color-base-content) 68%, transparent);
+}
+
+/* 纸感浅色主题（Paper）。
+   daisyUI 已注册 xianii-light，这里在同一选择器上覆盖为暖纸色，
+   组件样式与 Tailwind 工具类会自动跟随，无需改任何组件。 */
+[data-theme="xianii-light"] {
+  --depth: 0;
+  color-scheme: light;
+
+  --color-base-100: #fffefa; /* 面板 / 卡片 */
+  --color-base-200: #f0ece2; /* 外壳底 */
+  --color-base-300: #ede8dc; /* 抬升面 / 折叠区 */
+  --color-base-content: #201d19;
+
+  --color-primary: #aa4a34; /* 赭红 */
+  --color-primary-content: #fffefa;
+  --color-secondary: #6b5a8e;
+  --color-secondary-content: #fffefa;
+  --color-accent: #3f6f68;
+  --color-accent-content: #fffefa;
+
+  --color-info: #35618f;
+  --color-info-content: #fffefa;
+  --color-success: #2f6b3f;
+  --color-success-content: #fffefa;
+  --color-warning: #8a6207;
+  --color-warning-content: #fffefa;
+  --color-error: #a52a26;
+  --color-error-content: #fffefa;
+
+  --surface-border: color-mix(in oklab, var(--color-base-content) 14%, transparent);
+  --surface-muted: var(--color-base-300);
+  --ink-meta: #57524a;
 }
 
 .btn, .modal-box, .alert, .card, .tabs-box {
@@ -73,7 +110,43 @@ body {
 .input:focus, .textarea:focus, .select:focus, .file-input:focus { border-color: var(--color-primary); outline-color: color-mix(in oklch, var(--color-primary) 35%, transparent); }
 .badge { font-weight: 500; }
 .alert { border: 1px solid color-mix(in oklch, currentColor 22%, transparent); }
-.chapter-content { max-width: 75ch; margin-inline: auto; }
+
+/* 正文排版：小说写作工具的核心阅读面。
+   中文长文用衬线、行高 2.0、首行缩进 2em，读起来才像"书"而不是"日志"。 */
+.chapter-content {
+  max-width: 62ch;
+  margin-inline: auto;
+  font-family: var(--font-prose);
+  font-size: 1.0625rem; /* 17px */
+  line-height: 2;
+  letter-spacing: .01em;
+}
+/* 正文由块列表渲染：每个段落块是一层 div.whitespace-pre-wrap，缩进按块生效 */
+.chapter-content [id^="story-block-"] > div.whitespace-pre-wrap { text-indent: 2em; margin-bottom: 1.1em; }
+/* 场景分隔线（text-center）不缩进 */
+.chapter-content [id^="story-block-"] > div.text-center { text-indent: 0; margin-bottom: 1.1em; }
+/* 流式输出时是纯文本节点，用 pre-wrap 保留换行 */
+.chapter-content { white-space: pre-wrap; }
+
+/* 章节标题与书名用衬线，建立"书"的层次 */
+.card-title, .app-project-title { font-family: var(--font-prose); letter-spacing: .02em; }
+
+/* 统一次级文字色 */
+.text-meta { color: var(--ink-meta); }
+
+/* 浅色（纸感）主题下的微调：纸面上卡片用纯白，嵌套面用米色 */
+[data-theme="xianii-light"] .card { background: var(--color-base-100); }
+[data-theme="xianii-light"] .card .card { background: var(--color-base-300); }
+[data-theme="xianii-light"] ::selection { background: color-mix(in oklab, var(--color-primary) 26%, transparent); }
+[data-theme="xianii-light"] .btn-outline:hover:not(:disabled, [disabled], .btn-disabled) {
+  --btn-bg: color-mix(in oklab, var(--btn-color, var(--color-base-content)) 10%, transparent);
+  --btn-fg: var(--btn-color, var(--color-base-content));
+  --btn-border: var(--btn-color, var(--color-base-content));
+}
+/* 纸感主题下正文阅读面用纯白，模拟"纸页"；深色主题保持 base-300 的抬升感 */
+[data-theme="xianii-light"] .reading-area { background: var(--color-base-100); }
+/* 折叠区（本章大纲/摘要）在纸面上用更浅的米色，避免抢正文 */
+[data-theme="xianii-light"] details.bg-base-300 { background: var(--color-base-300); }
 
 @media (max-width: 1279px) {
   .assistant-panel { position: absolute; z-index: 80; inset-block: 0; right: 0; width: min(28rem, 92vw); max-width: none; transform: translateX(100%); visibility: hidden; pointer-events: none; transition: transform 200ms ease-out; border-left: 1px solid var(--surface-border); }
@@ -100,6 +173,9 @@ body {
   .proofread-grid > :first-child { max-height: 22rem; }
   .join { max-width: 100%; }
   .join > .input { min-width: 0; }
+  /* 手机端正文略小，避免一屏只有几行 */
+  .chapter-content { font-size: 1rem; line-height: 1.9; max-width: none; }
+  .chapter-content [id^="story-block-"] > div.whitespace-pre-wrap { margin-bottom: .95em; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -129,10 +205,9 @@ body {
   background: color-mix(in oklch, var(--color-base-content) 30%, transparent);
 }
 
-/* Chapter content white-space */
+/* Chapter content white-space（行高与字号在上方 .chapter-content 主规则里统一设置） */
 .chapter-content {
   white-space: pre-wrap;
-  line-height: 1.8;
 }
 
 /* Markdown rendered content (chat bubbles) */

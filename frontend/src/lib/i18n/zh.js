@@ -110,6 +110,10 @@ export default {
   'app.uiLang.label': '界面语言',
   'app.uiLang.zh': '中',
   'app.uiLang.en': 'EN',
+  'app.theme.dark': '暗',
+  'app.theme.light': '亮',
+  'app.theme.toDark': '切换到暗色主题',
+  'app.theme.toLight': '切换到纸感浅色主题',
 
   // Navigation
   'nav.config': '配置',

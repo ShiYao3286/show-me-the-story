@@ -5,6 +5,7 @@
   import { api } from './lib/api.js';
   import { onMount, onDestroy } from 'svelte';
   import { t, uiLocale, setLocale } from './lib/i18n/index.js';
+  import { uiTheme, isLightTheme, toggleTheme } from './lib/theme.js';
   import TaskTokenBadge from './components/TaskTokenBadge.svelte';
   import Projects from './pages/Projects.svelte';
   import Config from './pages/Config.svelte';
@@ -131,6 +132,11 @@
     setLocale($uiLocale === 'en' ? 'zh' : 'en');
   }
 
+  // Keep the document title in sync with the UI language.
+  // Guarded: the .check.js regression scripts evaluate this script body in node:vm,
+  // where `document` does not exist.
+  $: if ($uiLocale && typeof document !== 'undefined') { document.title = $t('app.title'); }
+
   function openNavigation() {
     navigationOpen = true;
     requestAnimationFrame(() => document.querySelector('#workspace-navigation button')?.focus());
@@ -209,6 +215,15 @@
       {/if}
     {/if}
     <span class="flex-1"></span>
+    <button
+      class="btn btn-ghost btn-xs gap-1"
+      on:click={toggleTheme}
+      aria-pressed={isLightTheme($uiTheme)}
+      title={$t(isLightTheme($uiTheme) ? 'app.theme.toDark' : 'app.theme.toLight')}
+      aria-label={$t(isLightTheme($uiTheme) ? 'app.theme.toDark' : 'app.theme.toLight')}
+    >
+      {isLightTheme($uiTheme) ? $t('app.theme.light') : $t('app.theme.dark')}
+    </button>
     <button
       class="btn btn-ghost btn-xs gap-1"
       on:click={toggleLocale}
