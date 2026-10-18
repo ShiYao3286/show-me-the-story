@@ -255,6 +255,14 @@ var messageCatalog = map[string]map[string]string{
 		LangZH: "工具调用解析失败且重试后仍无效，已中止",
 		LangEN: "Tool-call parse failed again after retry — aborted",
 	},
+	"log.agent_tools_unsupported": {
+		LangZH: "该端点不支持原生函数调用（tools 参数），已切换到提示词工具协议",
+		LangEN: "Endpoint does not support native function calling — switched to the prompt-based tool protocol",
+	},
+	"log.agent_native_tool_call": {
+		LangZH: "步骤 %d: 原生函数调用 → %s",
+		LangEN: "Step %d: native function call → %s",
+	},
 	"log.chat_done": {
 		LangZH: "助理回复完成",
 		LangEN: "Assistant reply complete.",

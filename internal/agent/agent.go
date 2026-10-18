@@ -56,14 +56,20 @@ func RunAgentLoop(goCtx context.Context, ctx *AgentContext, userMessage string, 
 	tools := getBuiltinTools()
 	toolDesc := buildToolDescriptions(tools)
 
-	systemPrompt := buildAgentSystemPrompt(ctx, toolDesc)
+	// Native function calling is the default transport. The prompt-based
+	// "<tool_call>" protocol stays as a fallback for endpoints that reject the
+	// tools parameter (see agentToolsUnsupported).
+	nativeTools := true
+	toolDecls := buildToolDeclarations(tools)
+
+	systemPrompt := buildAgentSystemPrompt(ctx, toolDesc, nativeTools)
 
 	toolResultLabel := "[工具结果]"
 	if i18n.NormalizeLanguage(ctx.Config.Language) == i18n.LangEN {
 		toolResultLabel = "[Tool result]"
 	}
 
-	messages := buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil)
+	messages := buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil, nativeTools)
 
 	// ponytail: one parse-retry per loop; ceiling = still-broken after retry → hard error (no silent final reply).
 	parseRetryUsed := false
@@ -78,13 +84,35 @@ func RunAgentLoop(goCtx context.Context, ctx *AgentContext, userMessage string, 
 			for _, m := range messages {
 				roleSeq = append(roleSeq, fmt.Sprintf("%s(%d)", m.Role, len([]rune(m.Content))))
 			}
-			ctx.Logger.Info(fmt.Sprintf("[Agent] 步骤 %d/%d: 消息 %d 条: %v", step+1, maxSteps, len(messages), roleSeq))
+			ctx.Logger.Info(fmt.Sprintf("[Agent] 步骤 %d/%d: 消息 %d 条: %s", step+1, maxSteps, len(messages), strings.Join(roleSeq, " ")))
 		}
 
 		fullResp := ""
-		finishReason, err := callAgentAPI(goCtx, ctx.APICfg, messages, func(chunk string) {
-			fullResp += chunk
-		})
+		var nativeCalls []llm.ToolCall
+		var finishReason string
+		var err error
+		if nativeTools {
+			finishReason, nativeCalls, err = callAgentAPIWithTools(goCtx, ctx.APICfg, messages, toolDecls, func(chunk string) {
+				fullResp += chunk
+			})
+			if err != nil && agentToolsUnsupported(err) && historyHasToolResult(history) {
+				// The endpoint cannot carry a tool round trip (some gateways proxy
+				// to a provider without tool-result support). Replay the whole
+				// conversation through the text protocol for the remaining steps.
+				nativeTools = false
+				parseRetryUsed = false
+				systemPrompt = buildAgentSystemPrompt(ctx, toolDesc, nativeTools)
+				if ctx.Logger != nil {
+					ctx.Logger.WarnKey("log.agent_tools_unsupported")
+				}
+				messages = buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil, nativeTools)
+				continue
+			}
+		} else {
+			finishReason, err = callAgentAPI(goCtx, ctx.APICfg, messages, func(chunk string) {
+				fullResp += chunk
+			})
+		}
 		if err != nil {
 			if ctx.Logger != nil {
 				ctx.Logger.Error(fmt.Sprintf("[Agent] 步骤 %d: API 调用失败: %v", step+1, err))
@@ -92,6 +120,62 @@ func RunAgentLoop(goCtx context.Context, ctx *AgentContext, userMessage string, 
 			return "", history, agentErr(ctx, "agent.api_failed", err)
 		}
 
+		if ctx.Logger != nil {
+			ctx.Logger.Info(fmt.Sprintf("[Agent] 步骤 %d: API 响应 %d 字符 (finish_reason=%s, 原生工具调用=%d)", step+1, len(fullResp), finishReason, len(nativeCalls)))
+		}
+
+		// ---- Native function calling path ----
+		if nativeTools {
+			if len(nativeCalls) > 0 {
+				// The models may emit several calls; this app executes one at a time
+				// and asks for the remaining ones implicitly on the next turn.
+				call := nativeCalls[0]
+				args := json.RawMessage(call.Function.Arguments)
+				if len(strings.TrimSpace(call.Function.Arguments)) == 0 {
+					args = json.RawMessage("{}")
+				}
+				if !json.Valid(args) {
+					// Malformed arguments: report back as a tool error instead of
+					// crashing, so the model can correct itself.
+					history = append(history,
+						AgentStep{Role: "assistant", Content: fullResp, ToolCall: &ToolCall{Name: call.Function.Name, Arguments: json.RawMessage("{}")}},
+						AgentStep{Role: "tool", ToolResult: "工具参数不是合法 JSON，请重新调用并给出正确的 arguments。"},
+					)
+					messages = buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil, nativeTools)
+					continue
+				}
+				toolCall := &ToolCall{Name: call.Function.Name, Arguments: args}
+				if ctx.Logger != nil {
+					ctx.Logger.Info(fmt.Sprintf("[Agent] 步骤 %d: 检测到原生工具调用 → %s", step+1, toolCall.Name))
+				}
+				history = append(history, AgentStep{Role: "assistant", Content: stripToolCallTags(fullResp), ToolCall: toolCall})
+				if ctx.Logger != nil {
+					ctx.Logger.ToolCallStart("", toolCall.Name, string(toolCall.Arguments))
+				}
+				result, resultKey, resultArgs := executeTool(toolCall, tools, ctx)
+				if ctx.Logger != nil {
+					ctx.Logger.Info(fmt.Sprintf("[Agent] 步骤 %d: 工具 %s 执行完成", step+1, toolCall.Name))
+				}
+				history = append(history, AgentStep{
+					Role:           "tool",
+					ToolResult:     result,
+					ToolResultKey:  resultKey,
+					ToolResultArgs: resultArgs,
+				})
+				if ctx.Logger != nil {
+					ctx.Logger.ToolCallEnd("", toolCall.Name, story.Truncate(result, 200), resultKey, resultArgs)
+				}
+				messages = buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil, nativeTools)
+				continue
+			}
+			// No native call: the model answered in text. Treat it as final unless
+			// it emitted the legacy tag anyway (some gateways mix behaviours).
+			if parseToolCall(fullResp) == nil {
+				history = append(history, AgentStep{Role: "assistant", Content: fullResp})
+				return fullResp, history, nil
+			}
+			// Fall through to the text parser so mixed providers still work.
+		}
 		if ctx.Logger != nil {
 			ctx.Logger.Info(fmt.Sprintf("[Agent] 步骤 %d: API 响应 %d 字符 (finish_reason=%s)", step+1, len(fullResp), finishReason))
 		}
@@ -109,7 +193,7 @@ func RunAgentLoop(goCtx context.Context, ctx *AgentContext, userMessage string, 
 				messages = buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, []llm.Message{
 					{Role: "assistant", Content: fullResp},
 					{Role: "user", Content: feedback},
-				})
+				}, nativeTools)
 				continue
 			}
 			if ctx.Logger != nil {
@@ -171,7 +255,7 @@ func RunAgentLoop(goCtx context.Context, ctx *AgentContext, userMessage string, 
 			ctx.Logger.ToolCallEnd("", toolCall.Name, story.Truncate(result, 200), resultKey, resultArgs)
 		}
 
-		messages = buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil)
+		messages = buildAgentMessages(ctx, systemPrompt, userMessage, history, toolResultLabel, nil, nativeTools)
 	}
 
 	return agentMsg(ctx, "agent.max_steps"), history, nil
@@ -186,12 +270,12 @@ type agentMessageGroup struct {
 
 // buildAgentMessages projects persisted Agent history into one bounded LLM prompt.
 // The session remains complete for the chat UI; omitted tool data can be read again.
-func buildAgentMessages(ctx *AgentContext, systemPrompt, userMessage string, history []AgentStep, toolResultLabel string, tail []llm.Message) []llm.Message {
+func buildAgentMessages(ctx *AgentContext, systemPrompt, userMessage string, history []AgentStep, toolResultLabel string, tail []llm.Message, nativeToolsForHistory bool) []llm.Message {
 	budget := agentPromptInputBudget(ctx.APICfg)
 	tail = boundedAgentTail(systemPrompt, userMessage, tail, budget)
 	baseRunes := utf8.RuneCountInString(systemPrompt) + utf8.RuneCountInString(userMessage) + agentMessagesRuneCount(tail)
 	maxRunes := (2*budget + 1) / 3
-	groups, currentUserGroup := agentHistoryMessageGroups(history, toolResultLabel, omittedAgentToolResult(ctx.Config.Language))
+	groups, currentUserGroup := agentHistoryMessageGroups(history, toolResultLabel, omittedAgentToolResult(ctx.Config.Language), nativeToolsForHistory)
 	type selectedGroup struct {
 		index int
 		group agentMessageGroup
@@ -227,7 +311,7 @@ func buildAgentMessages(ctx *AgentContext, systemPrompt, userMessage string, his
 	return append(messages, tail...)
 }
 
-func agentHistoryMessageGroups(history []AgentStep, toolResultLabel, omittedResult string) ([]agentMessageGroup, int) {
+func agentHistoryMessageGroups(history []AgentStep, toolResultLabel, omittedResult string, nativeToolsForHistory bool) ([]agentMessageGroup, int) {
 	fullResults := make(map[int]bool, recentAgentToolResults)
 	for i := len(history) - 1; i >= 0 && len(fullResults) < recentAgentToolResults; i-- {
 		if history[i].Role == "tool" {
@@ -258,8 +342,22 @@ func agentHistoryMessageGroups(history []AgentStep, toolResultLabel, omittedResu
 		case "assistant":
 			message := llm.Message{Role: "assistant", Content: stripAgentReasoning(step.Content)}
 			if step.ToolCall != nil {
-				tcJSON, _ := json.Marshal(step.ToolCall)
-				message.Content = fmt.Sprintf("<tool_call>\n%s\n</tool_call>", tcJSON)
+				// Native function calling: report the call through tool_calls and
+				// pair it with a "tool" role message below. The legacy
+				// "<tool_call>" text form is still emitted when the transport fell
+				// back to prompt-based tooling (see agentUsesNativeTools).
+				if nativeToolsForHistory {
+					message.ToolCalls = []llm.ToolCall{toNativeToolCall(step.ToolCall)}
+					if strings.TrimSpace(message.Content) != "" && step.ToolResult != "" {
+						// Assistant text that accompanied a call would confuse some
+						// providers when replayed; the visible text already lives in
+						// the chat log.
+						message.Content = ""
+					}
+				} else {
+					tcJSON, _ := json.Marshal(step.ToolCall)
+					message.Content = fmt.Sprintf("<tool_call>\n%s\n</tool_call>", tcJSON)
+				}
 			}
 			groups = append(groups, agentMessageGroup{messages: []llm.Message{message}, toolResult: -1})
 			if step.ToolCall != nil {
@@ -272,7 +370,22 @@ func agentHistoryMessageGroups(history []AgentStep, toolResultLabel, omittedResu
 			if !fullResults[i] {
 				result = omittedResult
 			}
-			message := llm.Message{Role: "user", Content: fmt.Sprintf("%s\n%s", toolResultLabel, result)}
+			var message llm.Message
+			if nativeToolsForHistory && pendingTool >= 0 {
+				// Native tool replies must use role "tool" with the matching id.
+				prevGroup := groups[pendingTool]
+				var id, toolName string
+				if len(prevGroup.messages) > 0 {
+					prev := prevGroup.messages[len(prevGroup.messages)-1]
+					if len(prev.ToolCalls) > 0 {
+						id = prev.ToolCalls[0].ID
+						toolName = prev.ToolCalls[0].Function.Name
+					}
+				}
+				message = llm.Message{Role: "tool", Content: result, ToolCallID: id, Name: toolName}
+			} else {
+				message = llm.Message{Role: "user", Content: fmt.Sprintf("%s\n%s", toolResultLabel, result)}
+			}
 			if pendingTool >= 0 {
 				groups[pendingTool].messages = append(groups[pendingTool].messages, message)
 				groups[pendingTool].toolResult = len(groups[pendingTool].messages) - 1
@@ -417,6 +530,97 @@ func callAgentAPI(ctx context.Context, apiCfg *config.APIConfig, messages []llm.
 	return syncResult.FinishReason, nil
 }
 
+// callAgentAPIWithTools is the function-calling counterpart of callAgentAPI.
+// It returns any native tool calls the model requested; finishReason is
+// "tool_calls" in that case.
+func callAgentAPIWithTools(ctx context.Context, apiCfg *config.APIConfig, messages []llm.Message, decls []llm.Tool, onChunk func(string)) (finishReason string, calls []llm.ToolCall, err error) {
+	agentCfg := *apiCfg
+	agentCfg.MaxTokens = agentEffectiveMaxTokens(apiCfg)
+
+	result, err := llm.CallAPIStreamMessagesWithTools(ctx, &agentCfg, messages, llm.StreamToolsOptions{
+		Tools:   decls,
+		OnChunk: onChunk,
+	})
+	if err == nil {
+		return result.FinishReason, result.ToolCalls, nil
+	}
+	// Only retry synchronously when the stream produced nothing; a partially
+	// streamed reply must not be duplicated.
+	if ctx.Err() != nil || result.Content != "" || len(result.ToolCalls) > 0 {
+		return "", nil, err
+	}
+	syncMessages := append([]llm.Message(nil), messages...)
+	syncResult, err2 := llm.CallAPIMessagesSyncWithTools(ctx, &agentCfg, syncMessages, decls)
+	if err2 != nil {
+		// Surface the original error: it carries the provider's rejection text,
+		// which agentToolsUnsupported inspects.
+		return "", nil, err
+	}
+	if syncResult.Content == "" && len(syncResult.ToolCalls) == 0 {
+		return "", nil, fmt.Errorf("API 返回空响应: %v", err)
+	}
+	if onChunk != nil && syncResult.Content != "" {
+		onChunk(syncResult.Content)
+	}
+	return syncResult.FinishReason, syncResult.ToolCalls, nil
+}
+
+// agentToolsUnsupported reports whether an error means the endpoint cannot carry
+// native function-calling payloads, so the prompt-based fallback is required.
+//
+// Two distinct situations land here:
+//  1. The provider rejects the request fields (tools/tool_choice).
+//  2. The provider accepts tools but cannot represent a "tool" role message, which
+//     only shows up from step 2 onwards — gateways proxying to a provider that
+//     lacks tool-result support return a bare 502 with an empty body.
+func agentToolsUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"tools is not supported",
+		"tools not supported",
+		"does not support tools",
+		"tool_choice",
+		"unknown field \"tools\"",
+		"unsupported parameter: tools",
+		"unrecognized request argument",
+		"function calling is not supported",
+		"functions is not supported",
+		// Tool-result representation failures.
+		"tool-result",
+		"tool result",
+		"tool messages",
+		"tool_calls need",
+		"unsupported_content",
+		"cannot represent",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	// Gateways sometimes answer with an empty 5xx body, which surfaces as an
+	// empty stream. That only happens after a tool round trip, so treat it as a
+	// transport incompatibility rather than a crash — but only when the
+	// conversation already contains a tool message (see caller-side guard).
+	if strings.Contains(msg, "流式响应为空") || strings.Contains(msg, "empty response") {
+		return true
+	}
+	return false
+}
+
+// historyHasToolResult reports whether the conversation already includes a tool
+// exchange. A tool-representation failure can only occur after that point.
+func historyHasToolResult(history []AgentStep) bool {
+	for _, step := range history {
+		if step.Role == "tool" {
+			return true
+		}
+	}
+	return false
+}
+
 // agentEffectiveMaxTokens returns the max_tokens floor used for Agent API calls.
 func agentEffectiveMaxTokens(apiCfg *config.APIConfig) int {
 	if apiCfg == nil || apiCfg.MaxTokens < 8192 {
@@ -466,11 +670,11 @@ func toolCallParseRetryFeedback(ctx *AgentContext, finishReason, content string)
 	return i18n.T(lang, "agent.tool_call_parse_retry_hint", reason, agentEffectiveMaxTokens(ctx.APICfg))
 }
 
-func buildAgentSystemPrompt(ctx *AgentContext, toolDesc string) string {
+func buildAgentSystemPrompt(ctx *AgentContext, toolDesc string, nativeTools bool) string {
 	if i18n.NormalizeLanguage(ctx.Config.Language) == i18n.LangEN {
-		return buildAgentSystemPromptEN(ctx, toolDesc)
+		return buildAgentSystemPromptEN(ctx, toolDesc, nativeTools)
 	}
-	return buildAgentSystemPromptZH(ctx, toolDesc)
+	return buildAgentSystemPromptZH(ctx, toolDesc, nativeTools)
 }
 
 // calcSynopsisLengthRange returns recommended synopsis length bounds (characters)
@@ -500,7 +704,7 @@ func calcSynopsisLengthRange(chapterCount, targetWordsPerChapter int) (minLen, m
 	return minLen, maxLen
 }
 
-func buildAgentSystemPromptZH(ctx *AgentContext, toolDesc string) string {
+func buildAgentSystemPromptZH(ctx *AgentContext, toolDesc string, nativeToolsPrompt bool) string {
 	var sb strings.Builder
 	sb.WriteString("结尾用途 ending_intent 可选 serial/final/sequel；ending_style 可选 closed/open/custom，自定义必填 ending_requirements。预定完结后继续追加必须先征得用户同意，才传 confirm_continue=true。编辑正文前读取 read_chapter 的事实关联和 content_rev；影响关联事实须向用户列出事实及相关章节并征得同意，才传 confirm_fact_impact=true。确认章节后自动同步设定；失败可在写作页重试。\n")
 	sb.WriteString("大纲按批次规划。generate_outline 必须传 chapter_count（1–36）与 outline_synopsis；默认追加，只有末尾全部未写批次可用 replace_last 重新规划。先 read_outline 获取批次 ID；全书梗概不是配置项。\n")
@@ -553,21 +757,30 @@ func buildAgentSystemPromptZH(ctx *AgentContext, toolDesc string) string {
 	sb.WriteString(toolDesc)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("## 工具调用格式\n")
-	sb.WriteString("当需要调用工具时，严格使用以下格式。注意：必须是合法的JSON，不要用XML标签包裹：\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "工具名称", "arguments": {"参数名": "参数值"}}`)
-	sb.WriteString("\n</tool_call>\n\n")
-	sb.WriteString("正确示例：\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "search_project", "arguments": {"query": "人物"}}`)
-	sb.WriteString("\n</tool_call>\n\n")
-	sb.WriteString("错误示例（不要这样写）：\n")
-	sb.WriteString("- 不要在 tool_call 标签内使用 arguments 等XML标签\n")
-	sb.WriteString("- 不要在 tool_call 标签外写工具调用JSON\n")
-	sb.WriteString("- 不要输出多个 tool_call 标签\n")
-	sb.WriteString("一次只能调用一个工具。等收到工具结果后再继续。\n")
-	sb.WriteString("当不需要调用工具时，直接回复用户即可。\n\n")
+	sb.WriteString("## 工具调用方式\n")
+	if nativeToolsPrompt {
+		// Native function calling: the tool catalogue was sent through the API's
+		// tools field, so describing a text protocol here would actively mislead
+		// the model into emitting raw tags.
+		sb.WriteString("工具已经通过 API 的 functions 机制提供。需要调用工具时，直接发起对应的函数调用即可，不要在正文里写任何标记或 JSON。\n")
+		sb.WriteString("一次只能调用一个工具。等收到工具结果后再继续。\n")
+		sb.WriteString("当不需要调用工具时，直接回复用户即可。\n\n")
+	} else {
+		sb.WriteString("当需要调用工具时，严格使用以下格式。注意：必须是合法的JSON，不要用XML标签包裹：\n")
+		sb.WriteString("<tool_call>\n")
+		sb.WriteString(`{"name": "工具名称", "arguments": {"参数名": "参数值"}}`)
+		sb.WriteString("\n</tool_call>\n\n")
+		sb.WriteString("正确示例：\n")
+		sb.WriteString("<tool_call>\n")
+		sb.WriteString(`{"name": "search_project", "arguments": {"query": "人物"}}`)
+		sb.WriteString("\n</tool_call>\n\n")
+		sb.WriteString("错误示例（不要这样写）：\n")
+		sb.WriteString("- 不要在 tool_call 标签内使用 arguments 等XML标签\n")
+		sb.WriteString("- 不要在 tool_call 标签外写工具调用JSON\n")
+		sb.WriteString("- 不要输出多个 tool_call 标签\n")
+		sb.WriteString("一次只能调用一个工具。等收到工具结果后再继续。\n")
+		sb.WriteString("当不需要调用工具时，直接回复用户即可。\n\n")
+	}
 
 	sb.WriteString("## 安全规则（最高优先级，违反将造成用户数据永久丢失）\n")
 	sb.WriteString("1. **修改 ≠ 删除**。当用户要求「修改/调整/润色/修正某一章」时，必须且只能使用 revise_chapter 工具（通过 num 参数指定章节号）。绝对禁止通过 delete_chapter / delete_chapters_from / delete_outline / reset_progress 来实现任何形式的「修改」需求。\n")
@@ -586,7 +799,11 @@ func buildAgentSystemPromptZH(ctx *AgentContext, toolDesc string) string {
 
 	sb.WriteString("## 重要规则\n")
 	sb.WriteString("- 异步工具（如 generate_outline、generate_chapter 等）会立即返回「任务已启动」，任务结果通过日志推送到界面。你必须先调用工具，收到工具结果后才能告知用户任务已启动。绝对不要在没有调用工具的情况下输出「请等待」「请耐心等待」「请稍等」「正在生成」等文字——如果用户请求的操作你无法完成，直接说明原因即可。\n")
-	sb.WriteString("- 调用工具时，**不要输出任何解释文字**，直接输出 <tool_call> 标签。解释放在收到工具结果之后。\n")
+	if nativeToolsPrompt {
+		sb.WriteString("- 调用工具时，**不要输出任何解释文字**，直接发起函数调用。解释放在收到工具结果之后。\n")
+	} else {
+		sb.WriteString("- 调用工具时，**不要输出任何解释文字**，直接输出 <tool_call> 标签。解释放在收到工具结果之后。\n")
+	}
 	sb.WriteString("- 当用户提交故事配置时（如「请更新以下故事配置」），使用 update_project_config 工具。\n")
 	sb.WriteString("- 当用户提交写作风格或故事梗概的更新时（如「请更新写作风格:」或「请更新故事梗概:」），使用 update_project_config 工具保存对应字段。\n")
 	sb.WriteString("- **配置保护**：若某字段用户已在配置页填写（非空），你不得静默覆盖。需要修改时，先在对话中说明当前值与建议值的差异及理由，等用户明确同意后再调用 update_project_config 并传入 confirm_overwrite=true。\n")
@@ -601,7 +818,7 @@ func buildAgentSystemPromptZH(ctx *AgentContext, toolDesc string) string {
 	return sb.String()
 }
 
-func buildAgentSystemPromptEN(ctx *AgentContext, toolDesc string) string {
+func buildAgentSystemPromptEN(ctx *AgentContext, toolDesc string, nativeToolsPrompt bool) string {
 	var sb strings.Builder
 	sb.WriteString("ending_intent is serial/final/sequel; ending_style is closed/open/custom, with ending_requirements required for custom. Ask the author before continuing past a planned ending and setting confirm_continue=true. Before editing prose, use read_chapter for facts and content_rev; disclose affected facts and linked chapters and obtain author consent before setting confirm_fact_impact=true. Accepted chapters automatically sync settings; failed sync can be retried from Writing.\n")
 	sb.WriteString("Plan outlines in batches. generate_outline requires chapter_count (1–36) and outline_synopsis. Default to append; replace_last can only replan the last entirely unwritten batch. Read batch IDs with read_outline. Do not store a whole-book synopsis in config.\n")
@@ -655,20 +872,26 @@ func buildAgentSystemPromptEN(ctx *AgentContext, toolDesc string) string {
 	sb.WriteString("\n\n")
 
 	sb.WriteString("## Tool-call format\n")
-	sb.WriteString("When you need to call a tool, use this exact format. The payload must be valid JSON; do not wrap arguments in XML tags:\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "tool_name", "arguments": {"arg_name": "arg_value"}}`)
-	sb.WriteString("\n</tool_call>\n\n")
-	sb.WriteString("Correct example:\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "search_project", "arguments": {"query": "character"}}`)
-	sb.WriteString("\n</tool_call>\n\n")
-	sb.WriteString("Incorrect examples (do NOT do this):\n")
-	sb.WriteString("- Do not use XML tags such as <arguments> inside <tool_call>\n")
-	sb.WriteString("- Do not write tool-call JSON outside the <tool_call> tag\n")
-	sb.WriteString("- Do not emit multiple <tool_call> tags at once\n")
-	sb.WriteString("Call one tool at a time. Wait for the tool result before continuing.\n")
-	sb.WriteString("If no tool is needed, just reply directly to the user.\n\n")
+	if nativeToolsPrompt {
+		sb.WriteString("Tools are provided through the API's function-calling mechanism. Call the function directly when you need a tool; do not write any tags or JSON in your reply text.\n")
+		sb.WriteString("Call one tool at a time. Wait for the tool result before continuing.\n")
+		sb.WriteString("If no tool is needed, just reply directly to the user.\n\n")
+	} else {
+		sb.WriteString("When you need to call a tool, use this exact format. The payload must be valid JSON; do not wrap arguments in XML tags:\n")
+		sb.WriteString("<tool_call>\n")
+		sb.WriteString(`{"name": "tool_name", "arguments": {"arg_name": "arg_value"}}`)
+		sb.WriteString("\n</tool_call>\n\n")
+		sb.WriteString("Correct example:\n")
+		sb.WriteString("<tool_call>\n")
+		sb.WriteString(`{"name": "search_project", "arguments": {"query": "character"}}`)
+		sb.WriteString("\n</tool_call>\n\n")
+		sb.WriteString("Incorrect examples (do NOT do this):\n")
+		sb.WriteString("- Do not use XML tags such as <arguments> inside <tool_call>\n")
+		sb.WriteString("- Do not write tool-call JSON outside the <tool_call> tag\n")
+		sb.WriteString("- Do not emit multiple <tool_call> tags at once\n")
+		sb.WriteString("Call one tool at a time. Wait for the tool result before continuing.\n")
+		sb.WriteString("If no tool is needed, just reply directly to the user.\n\n")
+	}
 
 	sb.WriteString("## Safety rules (highest priority — violating them causes permanent user-data loss)\n")
 	sb.WriteString("1. **Edit != Delete**. When the user asks to \"revise/adjust/polish/fix chapter N\", you MUST use the revise_chapter tool (pass the chapter number via the num argument). NEVER use delete_chapter / delete_chapters_from / delete_outline / reset_progress to satisfy any kind of \"edit\" request.\n")
@@ -687,7 +910,11 @@ func buildAgentSystemPromptEN(ctx *AgentContext, toolDesc string) string {
 
 	sb.WriteString("## Important rules\n")
 	sb.WriteString("- Async tools (generate_outline, generate_chapter, etc.) return \"task started\" immediately; results are pushed to the UI via logs. You MUST call the tool first and tell the user it has started only after receiving the tool result. Never output \"please wait\", \"hold on\", \"generating now\", or similar text without actually calling a tool — if you cannot fulfil the request, just explain why.\n")
-	sb.WriteString("- When calling a tool, **output NO explanatory text** — emit the <tool_call> tag directly. Explain after you receive the tool result.\n")
+	if nativeToolsPrompt {
+		sb.WriteString("- When calling a tool, **output NO explanatory text** — make the function call directly. Explain after you receive the tool result.\n")
+	} else {
+		sb.WriteString("- When calling a tool, **output NO explanatory text** — emit the <tool_call> tag directly. Explain after you receive the tool result.\n")
+	}
 	sb.WriteString("- When the user submits a story-config update (e.g. \"please update the following story config\"), use update_project_config.\n")
 	sb.WriteString("- When the user submits a writing-style or synopsis update (e.g. \"please update writing style:\" or \"please update synopsis:\"), use update_project_config to save the corresponding field.\n")
 	sb.WriteString("- **Config protection**: If a field is already filled in by the user (non-empty), you must NOT overwrite it silently. Explain the diff and your reasoning in chat, wait for explicit user approval, then call update_project_config with confirm_overwrite=true.\n")

@@ -126,6 +126,9 @@ main.go
 - 每个模型请求以 `ContextBudgetTokens - MaxTokens - max(4096, 5% 上下文窗口)` 作为保守估算的输入上限；模型端点能报告更小的真实窗口时自动向下收紧配置，最终预检超限属于不可重试错误。
 - Agent 聊天会话保留完整 UI 记录；模型上下文则按实际输入预算投影，剥离明确的 reasoning 标签，并将较早工具结果替换为可重新读取的短记录。投影必须保留当前用户指令先于本轮工具调用和结果的顺序；截断内容连同标记按整条消息列表的总字符数估算，必须符合模型请求的 token 预检预算。
 - Agent 的 `search_project` 按关键词检索已加载项目的角色、世界观、组织、伏笔和章纲；字段匹配不能漏掉已持久化条目的正文信息。备份恢复后需选择新项目，助理才使用新项目的设定。
+- **Agent 工具调用默认走原生 function calling**：`llm.CallAPIStreamMessagesWithTools` 在请求里发 `tools`（`tool_choice=auto`、`parallel_tool_calls=false`），流式 `tool_calls` 按 `index` 累积，历史用 `assistant.tool_calls` + `role: "tool"` + `tool_call_id` 配对。**不要改回纯提示词约定**：那需要模型自觉输出 `<tool_call>` JSON，遇到返回自有标记（如 DSML）的模型会把原始标记当正文显示给用户。
+- 工具声明由 `buildToolDeclarations` 从 `Tool.Parameters` 的简写生成 JSON Schema（`{"num":"章节号"}` 这种），类型靠 `inferParamType` 猜测；新增工具时必须保证简写可解析成 JSON，否则退化为空对象 schema。
+- **文本协议仍保留为回退**：`agentToolsUnsupported` 识别两类失败（拒绝 `tools` 字段；无法表达 `tool` 角色消息）后切换到提示词协议。第二类只在 `historyHasToolResult` 为真时回退，因为网关对 tool 消息的失败表现为空 5xx body（「流式响应为空」），首轮出现同类错误应视为普通故障。两种协议的提示词由 `buildAgentSystemPrompt(..., nativeTools)` 切换，原生模式**不得**再出现 `<tool_call>` 字样。
 - 提示词占位符是 `config.RenderPrompt` 的 `{{.Key}}` 字符串替换，不是 `text/template`。
 - 新增 prompt 字段时同步更新 `PromptsConfig`、中英默认模板和 `ApplyDefaults`；新增注入块或 system prompt 必须同时提供中英文。
 - Skill 包必须包含 schema v1 的 `skill.json` 及其声明的 Markdown 入口（通常为 `SKILL.md`），仅接受安全校验后的 `.md/.txt/.json`；所有 Skill 默认禁用，并按项目语言、`applies_to` 和动作类别过滤。

@@ -153,7 +153,7 @@ func TestBuildAgentMessagesBoundsHistory(t *testing.T) {
 		{Role: "tool", ToolResult: "recent tool result two"},
 	}
 
-	messages := buildAgentMessages(ctx, "system", "current request", history, "[Tool result]", nil)
+	messages := buildAgentMessages(ctx, "system", "current request", history, "[Tool result]", nil, false)
 	prompt := strings.Join(func() []string {
 		parts := make([]string, len(messages))
 		for i, message := range messages {
@@ -185,7 +185,7 @@ func TestBuildAgentMessagesTruncatesLatestToolResult(t *testing.T) {
 		{Role: "tool", ToolResult: latestResult},
 	}
 
-	messages := buildAgentMessages(ctx, "system", "current request", history, "[Tool result]", nil)
+	messages := buildAgentMessages(ctx, "system", "current request", history, "[Tool result]", nil, false)
 	prompt := strings.Join(func() []string {
 		parts := make([]string, len(messages))
 		for i, message := range messages {
@@ -213,7 +213,7 @@ func TestBuildAgentMessagesBoundsRetryTail(t *testing.T) {
 		{Role: "user", Content: "retry the malformed tool call"},
 	}
 
-	messages := buildAgentMessages(ctx, "system", "current request", nil, "[Tool result]", tail)
+	messages := buildAgentMessages(ctx, "system", "current request", nil, "[Tool result]", tail, false)
 	prompt := strings.Join(func() []string {
 		parts := make([]string, len(messages))
 		for i, message := range messages {
@@ -273,7 +273,7 @@ func TestBuildAgentMessagesKeepsCurrentTurnOrder(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			messages := buildAgentMessages(ctx, "system", "create Mira", tt.history, "[Tool result]", tt.tail)
+			messages := buildAgentMessages(ctx, "system", "create Mira", tt.history, "[Tool result]", tt.tail, false)
 			if len(messages) != len(tt.want) {
 				t.Fatalf("messages=%v; want %d messages", messages, len(tt.want))
 			}
@@ -297,7 +297,7 @@ func TestBuildAgentMessagesBoundsCurrentToolResultAtPreflight(t *testing.T) {
 		{Role: "assistant", ToolCall: &ToolCall{Name: "read_chapter"}},
 		{Role: "tool", ToolResult: strings.Repeat("x", 50000)},
 	}
-	messages := buildAgentMessages(ctx, "s", "u", history, "[Tool result]", nil)
+	messages := buildAgentMessages(ctx, "s", "u", history, "[Tool result]", nil, false)
 	if len(messages) != 4 || messages[1].Content != "u" || !strings.Contains(messages[3].Content, "[Tool result truncated.") {
 		t.Fatalf("current request or truncated tool result missing: %v", messages)
 	}
