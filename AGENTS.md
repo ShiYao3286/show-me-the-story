@@ -177,3 +177,8 @@ graphify explain "<概念>"
 ```
 
 代码修改后运行 `graphify update .`；图谱生成文件变脏不构成跳过理由。
+
+## 待开发计划
+
+- **Windows 系统托盘**（待开发，方案见 `docs/tray-plan.md`）：常驻通知区图标 + 右键菜单（打开界面 / 打开数据目录 / 退出），退出前检查运行中的 AI 任务并优雅关闭 HTTP 服务。要求纯 `syscall` 实现、不引入第三方依赖、用 `//go:build windows` 隔离、非 Windows 平台行为不变。实施前需先把 `StartWebServer` 改成可关闭（返回 `*http.Server`）。与「WebView2 原生窗口」「默认监听 127.0.0.1」「单实例锁」是独立议题，不要混在同一改动里。
+- 新增此类长期计划时，方案写入 `docs/`，本文件只留一行索引与硬约束。
