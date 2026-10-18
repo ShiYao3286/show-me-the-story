@@ -59,6 +59,59 @@
   // expression can miss updates. A `$:` derivation tracks the field reliably.
   $: canFetchModels = !!(localApiCfg && localApiCfg.base_url && localApiCfg.base_url.trim());
 
+  // Model list grouped by vendor for the <optgroup>. Aggregating gateways expose
+  // dozens of models; a flat list is unusable. group_label carries the Chinese
+  // vendor name when the backend knows it. Models without a group go last.
+  const UNGROUPED = '__ungrouped__';
+  $: modelGroups = (() => {
+    const byGroup = new Map();
+    for (const m of models) {
+      const key = m.group || UNGROUPED;
+      if (!byGroup.has(key)) byGroup.set(key, []);
+      byGroup.get(key).push(m);
+    }
+    const groups = [...byGroup.entries()]
+      .filter(([k]) => k !== UNGROUPED)
+      .map(([key, items]) => ({
+        key,
+        // Prefer the localized vendor name, fall back to the raw key.
+        label: items[0]?.group_label || key,
+        items: sortModels(items),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    if (byGroup.has(UNGROUPED)) {
+      groups.push({ key: UNGROUPED, label: $t('config.api.models.ungrouped'), items: sortModels(byGroup.get(UNGROUPED)) });
+    }
+    return groups;
+  })();
+
+  function sortModels(list) {
+    return [...list].sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  }
+
+  // Prefer the provider's display name (which often already carries the suffix,
+  // e.g. "Deepseek-V4.1-Flash · x0.11"), then keep the id and capabilities as
+  // hints. Never rewrite the suffix: it distinguishes tiers the user needs.
+  function modelLabel(m) {
+    const base = (m.name && m.name.trim()) || shortModelID(m.id);
+    const bits = [];
+    if (m.name && m.name !== m.id) bits.push(m.id);
+    if (m.context_window) bits.push(m.context_window + ' ctx');
+    if (m.input && m.input.includes('image')) bits.push($t('config.api.models.vision'));
+    if (m.reasoning && m.reasoning.length) bits.push($t('config.api.models.reasoning'));
+    return bits.length ? `${base} · ${bits.join(' · ')}` : base;
+  }
+
+  // Without a display name, show the id without its already-shown vendor prefix
+  // ("me/gpt-5.6-luna" under group "个人" reads better as "gpt-5.6-luna").
+  function shortModelID(id) {
+    if (!id) return '';
+    const m = models.find(x => x.id === id);
+    const group = m && m.group;
+    if (group && id.startsWith(group + '/')) return id.slice(group.length + 1);
+    return id;
+  }
+
   async function loadProfiles() {
     profilesLoading = true;
     try {
@@ -716,13 +769,19 @@
                 {#if showModelPicker && models.length}
                   <!-- Keep the typed model selectable even when the endpoint's list
                        uses a different id (e.g. qwen2.5-14b vs qwen2.5-14b-instruct),
-                       otherwise the select renders blank and looks broken. -->
+                       otherwise the select renders blank and looks broken.
+                       Group by vendor: large gateways return dozens of models and a
+                       flat list is unusable. -->
                   <select class="select select-sm w-full" bind:value={localApiCfg.model} disabled={$taskRunning || testingApi}>
                     {#if localApiCfg.model && !models.some(m => m.id === localApiCfg.model)}
                       <option value={localApiCfg.model}>{localApiCfg.model}（{$t('config.api.models.manual')}）</option>
                     {/if}
-                    {#each models as m}
-                      <option value={m.id}>{m.id}{m.context_window ? ' · ' + m.context_window + ' ctx' : ''}</option>
+                    {#each modelGroups as g}
+                      <optgroup label={g.label}>
+                        {#each g.items as m}
+                          <option value={m.id}>{modelLabel(m)}</option>
+                        {/each}
+                      </optgroup>
                     {/each}
                   </select>
                 {:else}

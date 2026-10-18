@@ -449,6 +449,9 @@ export default {
   'config.api.models.manual': 'Type manually',
   'config.api.models.failed': 'Failed: {error}',
   'config.api.models.hint': 'Use "List models" to read the models this endpoint offers',
+  'config.api.models.ungrouped': 'Other',
+  'config.api.models.vision': 'image',
+  'config.api.models.reasoning': 'reasoning',
   'config.api.contextBudget': 'Context budget (tokens)',
   'config.api.contextBudget.tooltip': 'Total context window of the model. Leave 0/empty to auto-fill from the real window reported by /models at startup.',
 

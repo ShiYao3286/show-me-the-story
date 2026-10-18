@@ -453,6 +453,9 @@ export default {
   'config.api.models.manual': '手动填写',
   'config.api.models.failed': '拉取失败：{error}',
   'config.api.models.hint': '点「拉取模型」可读取该服务提供的模型列表',
+  'config.api.models.ungrouped': '其他',
+  'config.api.models.vision': '图片',
+  'config.api.models.reasoning': '推理',
   'config.api.contextBudget': '上下文预算 Tokens',
   'config.api.contextBudget.tooltip': '模型可用的总上下文窗口。填 0 或留空时，启动会用 /models 探测到的真实窗口自动填充。',
 
