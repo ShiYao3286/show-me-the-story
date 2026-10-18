@@ -1,7 +1,7 @@
 # Windows 安装包构建说明
 
 > 仓库：<https://github.com/ShiYao3286/show-me-the-story>
-> 工作流：[windows-installer.yml](../.github/workflows/windows-installer.yml)
+> 工作流：[windows-installer.yml](../../.github/workflows/windows-installer.yml)
 > 产物：`ShowMeTheStory-Setup-<version>-windows-amd64.exe`（简体中文向导）
 
 ---
