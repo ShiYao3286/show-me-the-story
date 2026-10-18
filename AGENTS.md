@@ -56,7 +56,7 @@ main.go
 - `internal/story/`：大纲、写作、事实与设定、伏笔、导入、Skill、会话、校订等领域逻辑。
 - `internal/llm/`：OpenAI 兼容客户端、流式完整性、重试、token 统计、JSON 提取、模型列表。
 - `internal/config/`：API/项目配置、多端点配置档案、平台预设和中英默认提示词。
-- `internal/sse/`、`i18n/`、`prose/`、`fsutil/`、`devlog/`：领域无关基础能力。
+- `internal/tray/`：Windows 通知区图标（纯 syscall，非 Windows 为空实现）。`internal/sse/`、`i18n/`、`prose/`、`fsutil/`、`devlog/`：领域无关基础能力。
 - `frontend/src/`：Svelte 页面、组件、stores、API/SSE/i18n；生产产物仅在 `frontend/dist/`。
 
 依赖必须保持单向：`httpapi → agent → story → 基础包`。`sse` 的事件负载保持 `any`，不得反向依赖领域包。不要恢复已废弃的根目录 `static/` 单页实现。
@@ -177,8 +177,3 @@ graphify explain "<概念>"
 ```
 
 代码修改后运行 `graphify update .`；图谱生成文件变脏不构成跳过理由。
-
-## 待开发计划
-
-- **Windows 系统托盘**（待开发，方案见 `docs/tray-plan.md`）：常驻通知区图标 + 右键菜单（打开界面 / 打开数据目录 / 退出），退出前检查运行中的 AI 任务并优雅关闭 HTTP 服务。要求纯 `syscall` 实现、不引入第三方依赖、用 `//go:build windows` 隔离、非 Windows 平台行为不变。实施前需先把 `StartWebServer` 改成可关闭（返回 `*http.Server`）。与「WebView2 原生窗口」「默认监听 127.0.0.1」「单实例锁」是独立议题，不要混在同一改动里。
-- 新增此类长期计划时，方案写入 `docs/`，本文件只留一行索引与硬约束。

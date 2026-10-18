@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"showmethestory/internal/story"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,7 +28,33 @@ import (
 // be rooted at the built frontend (index.html at its top level).
 func StartWebServer(apiCfg *config.APIConfig, apiCfgPath string, logger *sse.LogBroadcaster, port, progDir, version string, staticFiles fs.FS) {
 	h := NewHandlers(apiCfg, apiCfgPath, logger, progDir, version)
+	handler := h.buildHandler(staticFiles)
 
+	srv := &http.Server{
+		Addr:         port,
+		Handler:      handler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	fmt.Printf(" [系统] AI 小说写手 Web UI 启动中...\n")
+	fmt.Printf(" [系统] 访问地址: http://localhost%s\n", port)
+	fmt.Printf(" [系统] 程序目录: %s\n", progDir)
+	fmt.Printf(" [系统] 项目目录: %s\n", filepath.Join(progDir, "storys"))
+
+	go openBrowser(fmt.Sprintf("http://localhost%s", port))
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, " [错误] 服务器启动失败: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// buildHandler registers every route and returns the fully wrapped handler.
+// Shared by the blocking and the non-blocking entry points so both serve the
+// exact same API surface.
+func (h *Handlers) buildHandler(staticFiles fs.FS) http.Handler {
 	mux := http.NewServeMux()
 
 	// Project management endpoints
@@ -185,26 +213,94 @@ func StartWebServer(apiCfg *config.APIConfig, apiCfgPath string, logger *sse.Log
 	})
 
 	handler := recoveryMiddleware(corsMiddleware(loggingMiddleware(projectWriteMiddleware(mux))))
+	return handler
+}
+
+// WebServer is a running server handle that callers can shut down gracefully.
+// StartWebServerNonBlocking returns it once the listener is ready, so a host
+// process (e.g. the tray) can stop the app without killing an in-flight save.
+type WebServer struct {
+	srv    *http.Server
+	addr   string
+	h      *Handlers
+	ln     net.Listener
+	closed atomic.Bool
+}
+
+// Addr is the address the server is listening on (e.g. "localhost:48090").
+func (w *WebServer) Addr() string { return w.addr }
+
+// TaskRunning reports whether an AI task is in flight. The tray asks before
+// letting the user quit, because a hard exit can interrupt persistence.
+func (w *WebServer) TaskRunning() bool {
+	if w == nil || w.h == nil {
+		return false
+	}
+	return w.h.isTaskRunning()
+}
+
+// Shutdown stops accepting connections and waits for in-flight requests to
+// finish, up to the context deadline. Safe to call more than once.
+//
+// The SSE stream is closed first: it is a long-lived subscription that would
+// otherwise keep Shutdown waiting until the deadline. Surviving browser tabs
+// simply reconnect, but by then the process is exiting.
+func (w *WebServer) Shutdown(ctx context.Context) error {
+	if w == nil || w.closed.Swap(true) {
+		return nil
+	}
+	w.h.CloseEventStreams()
+	return w.srv.Shutdown(ctx)
+}
+
+// CloseEventStreams ends every open SSE subscription so handlers return
+// promptly during shutdown. Safe to call more than once.
+func (h *Handlers) CloseEventStreams() {
+	if h == nil || h.logger == nil {
+		return
+	}
+	h.logger.Close()
+}
+
+// StartWebServerNonBlocking builds the same server as StartWebServer, but starts
+// listening in the background and returns a handle as soon as the socket is
+// bound. It is used when the process owns a UI of its own (the Windows tray) and
+// therefore must stay in control of the main goroutine.
+func StartWebServerNonBlocking(apiCfg *config.APIConfig, apiCfgPath string, logger *sse.LogBroadcaster, port, progDir, version string, staticFiles fs.FS, openBrowserOnStart bool) (*WebServer, error) {
+	h := NewHandlers(apiCfg, apiCfgPath, logger, progDir, version)
+	handler := h.buildHandler(staticFiles)
+
+	ln, err := net.Listen("tcp", port)
+	if err != nil {
+		return nil, fmt.Errorf("监听端口 %s 失败: %w", port, err)
+	}
 
 	srv := &http.Server{
-		Addr:         port,
 		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 
+	addr := fmt.Sprintf("localhost%s", port)
 	fmt.Printf(" [系统] AI 小说写手 Web UI 启动中...\n")
-	fmt.Printf(" [系统] 访问地址: http://localhost%s\n", port)
+	fmt.Printf(" [系统] 访问地址: http://%s\n", addr)
 	fmt.Printf(" [系统] 程序目录: %s\n", progDir)
 	fmt.Printf(" [系统] 项目目录: %s\n", filepath.Join(progDir, "storys"))
 
-	go openBrowser(fmt.Sprintf("http://localhost%s", port))
+	ws := &WebServer{srv: srv, addr: addr, h: h, ln: ln}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintf(os.Stderr, " [错误] 服务器启动失败: %v\n", err)
-		os.Exit(1)
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, " [错误] 服务器运行失败: %v\n", err)
+		}
+	}()
+
+	if openBrowserOnStart {
+		go openBrowser("http://" + addr)
 	}
+
+	return ws, nil
 }
 
 // Project management handlers

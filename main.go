@@ -97,5 +97,11 @@ func main() {
 		log.Fatalf("嵌入静态文件失败: %v", err)
 	}
 
+	// On Windows the process shows a notification-area icon and owns its own
+	// lifetime; elsewhere it stays a plain blocking server.
+	if runWithTray(apiCfg, apiCfgPath, logger, port, progDir, version, staticFS) {
+		return
+	}
+
 	httpapi.StartWebServer(apiCfg, apiCfgPath, logger, port, progDir, version, staticFS)
 }
